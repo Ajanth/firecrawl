@@ -137,35 +137,38 @@ jobs:
             fi
 
             # Stop any other container holding the port (from any other project).
-            mapfile -t port_containers < <(sudo docker ps --format '{{.ID}} {{.Names}} {{.Ports}}' | grep -E "(:|0\\.0\\.0\\.0:|127\\.0\\.0\\.1:)${HOST_PORT}->" | awk '{print $1}' || true)
-            for cid in "${port_containers[@]:-}"; do
+            mapfile -t port_containers < <(sudo docker ps --filter "publish=${HOST_PORT}" --format '{{.ID}}' || true)
+            for cid in "${port_containers[@]}"; do
+              [ -n "${cid:-}" ] || continue
               echo "Stopping container using port ${HOST_PORT}: $cid"
               sudo docker stop "$cid" || true
               sudo docker rm "$cid" || true
             done
 
-            if sudo ss -ltnp "sport = :${HOST_PORT}" 2>/dev/null | grep -q .; then
+            # Use -H to avoid matching ss headers (false positives).
+            if sudo ss -H -ltnp "sport = :${HOST_PORT}" 2>/dev/null | grep -q .; then
               echo "Port ${HOST_PORT} still in use after container cleanup; attempting to kill listener..."
-              sudo ss -ltnp "sport = :${HOST_PORT}" || true
+              sudo ss -H -ltnp "sport = :${HOST_PORT}" || true
               sudo fuser -k "${HOST_PORT}/tcp" || true
               sleep 2
             fi
 
-            if sudo ss -ltnp "sport = :${HOST_PORT}" 2>/dev/null | grep -q .; then
+            if sudo ss -H -ltnp "sport = :${HOST_PORT}" 2>/dev/null | grep -q .; then
               echo "Port ${HOST_PORT} still in use; details:"
-              sudo ss -ltnp "sport = :${HOST_PORT}" || true
+              sudo ss -H -ltnp "sport = :${HOST_PORT}" || true
 
               # If a stale docker-proxy is holding the port, restarting Docker clears it.
-              if sudo ss -ltnp "sport = :${HOST_PORT}" 2>/dev/null | grep -q 'docker-proxy'; then
+              if sudo ss -H -ltnp "sport = :${HOST_PORT}" 2>/dev/null | grep -q 'docker-proxy'; then
                 echo "Detected docker-proxy holding port ${HOST_PORT}; restarting Docker..."
                 sudo systemctl restart docker
                 sleep 3
               fi
             fi
 
-            if sudo ss -ltnp "sport = :${HOST_PORT}" 2>/dev/null | grep -q .; then
+            if sudo ss -H -ltnp "sport = :${HOST_PORT}" 2>/dev/null | grep -q .; then
               echo "Port ${HOST_PORT} is still in use after cleanup; refusing to continue."
               sudo docker ps --format '{{.Names}} {{.Ports}}' | grep -E "(:|0\\.0\\.0\\.0:|127\\.0\\.0\\.1:)${HOST_PORT}->" || true
+              sudo ss -H -ltnp "sport = :${HOST_PORT}" || true
               exit 1
             fi
 
