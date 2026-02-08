@@ -33,33 +33,33 @@ jobs:
               sudo systemctl start docker
             fi
 
-            # Ensure Compose v2 is available as `docker compose`. Ubuntu's repo doesn't always ship
-            # `docker-compose-plugin`, so fall back to installing the official plugin binary.
+            # Ensure Compose v2 is available as `docker compose`.
+            # On Ubuntu 24.04, the most reliable path is installing `docker-compose-v2`.
+            # Only if that fails do we add Docker's official apt repo to get `docker-compose-plugin`.
             if ! sudo docker compose version >/dev/null 2>&1; then
-              echo "Installing docker compose plugin..."
-              if sudo apt-get install -y docker-compose-plugin; then
-                true
-              else
-                echo "Apt package docker-compose-plugin not available; installing plugin binary..."
-                arch="$(uname -m)"
-                case "$arch" in
-                  x86_64|amd64) bin="docker-compose-linux-x86_64" ;;
-                  aarch64|arm64) bin="docker-compose-linux-aarch64" ;;
-                  *)
-                    echo "Unsupported architecture for docker compose plugin: $arch"
-                    exit 1
-                    ;;
-                esac
-                ver="$(curl -fsSL https://api.github.com/repos/docker/compose/releases/latest | sed -n 's/.*\"tag_name\": \"\\(v[^\"]*\\)\".*/\\1/p' | head -n 1)"
-                if [ -z "$ver" ]; then
-                  echo "Failed to resolve latest docker/compose version"
-                  exit 1
-                fi
-                url="https://github.com/docker/compose/releases/download/${ver}/${bin}"
-                sudo mkdir -p /usr/local/lib/docker/cli-plugins
-                sudo curl -fsSL "$url" -o /usr/local/lib/docker/cli-plugins/docker-compose
-                sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
-              fi
+              echo "Installing docker compose (Ubuntu package: docker-compose-v2)..."
+              sudo apt-get install -y docker-compose-v2 || true
+            fi
+
+            if ! sudo docker compose version >/dev/null 2>&1; then
+              echo "Ubuntu package did not provide docker compose; adding Docker apt repo for compose plugin..."
+              sudo install -m 0755 -d /etc/apt/keyrings
+              sudo curl -fsSL https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+              sudo chmod a+r /etc/apt/keyrings/docker.asc
+
+              . /etc/os-release
+              arch="$(dpkg --print-architecture)"
+
+              echo "deb [arch=${arch} signed-by=/etc/apt/keyrings/docker.asc] https://download.docker.com/linux/ubuntu ${VERSION_CODENAME} stable" | sudo tee /etc/apt/sources.list.d/docker.list >/dev/null
+              sudo apt-get update -y
+
+              # Install just the compose plugin if possible; avoid re-installing docker engine here.
+              sudo apt-get install -y docker-compose-plugin || true
+            fi
+
+            if ! sudo docker compose version >/dev/null 2>&1; then
+              echo "Failed to install docker compose. Expected either `docker-compose-v2` or `docker-compose-plugin` to provide it."
+              exit 1
             fi
 
             echo "Verifying Docker..."
