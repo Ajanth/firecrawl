@@ -114,6 +114,44 @@ jobs:
                   - "127.0.0.1:${HOST_PORT}:3002"
             EOF
 
+            # Idempotency + port safety:
+            # - Bring the previous stack down (keeps named volumes unless -v is used).
+            # - Ensure the host port is free before starting, otherwise Docker will fail with "address already in use".
+            echo "Stopping previous firestorm stack (keeps volumes)..."
+            sudo docker compose --project-name firestorm \
+              -f docker-compose.yaml \
+              -f docker-compose.override.yaml \
+              -f docker-compose.firestorm.override.yaml \
+              --env-file .env \
+              down --remove-orphans || true
+
+            echo "Ensuring 127.0.0.1:${HOST_PORT} is free..."
+            # Stop any other container holding the port (from any other project).
+            mapfile -t port_containers < <(sudo docker ps --format '{{.ID}} {{.Names}} {{.Ports}}' | grep -E "(:|0\\.0\\.0\\.0:|127\\.0\\.0\\.1:)${HOST_PORT}->" | awk '{print $1}' || true)
+            for cid in "${port_containers[@]:-}"; do
+              echo "Stopping container using port ${HOST_PORT}: $cid"
+              sudo docker stop "$cid" || true
+              sudo docker rm "$cid" || true
+            done
+
+            if sudo ss -ltnp "sport = :${HOST_PORT}" 2>/dev/null | grep -q .; then
+              echo "Port ${HOST_PORT} still in use; details:"
+              sudo ss -ltnp "sport = :${HOST_PORT}" || true
+
+              # If a stale docker-proxy is holding the port, restarting Docker clears it.
+              if sudo ss -ltnp "sport = :${HOST_PORT}" 2>/dev/null | grep -q 'docker-proxy'; then
+                echo "Detected docker-proxy holding port ${HOST_PORT}; restarting Docker..."
+                sudo systemctl restart docker
+                sleep 3
+              fi
+            fi
+
+            if sudo ss -ltnp "sport = :${HOST_PORT}" 2>/dev/null | grep -q .; then
+              echo "Port ${HOST_PORT} is still in use after cleanup; refusing to continue."
+              sudo docker ps --format '{{.Names}} {{.Ports}}' | grep -E "(:|0\\.0\\.0\\.0:|127\\.0\\.0\\.1:)${HOST_PORT}->" || true
+              exit 1
+            fi
+
             sudo docker compose --project-name firestorm \
               -f docker-compose.yaml \
               -f docker-compose.override.yaml \
