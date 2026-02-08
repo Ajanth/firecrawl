@@ -1,0 +1,179 @@
+name: Firestorm - Deploy
+
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: firestorm-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Render env file for VM
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > firestorm.env <<'EOF'
+          # Required
+          HOST=0.0.0.0
+          INTERNAL_PORT=3002
+
+          # Optional (blank is OK)
+          OPENAI_API_KEY=${OPENAI_API_KEY}
+          BULL_AUTH_KEY=${BULL_AUTH_KEY}
+          POSTGRES_USER=${POSTGRES_USER}
+          POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+          POSTGRES_DB=${POSTGRES_DB}
+          PROXY_SERVER=${PROXY_SERVER}
+          PROXY_USERNAME=${PROXY_USERNAME}
+          PROXY_PASSWORD=${PROXY_PASSWORD}
+          EOF
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          BULL_AUTH_KEY: ${{ secrets.BULL_AUTH_KEY }}
+          POSTGRES_USER: ${{ secrets.POSTGRES_USER }}
+          POSTGRES_PASSWORD: ${{ secrets.POSTGRES_PASSWORD }}
+          POSTGRES_DB: ${{ secrets.POSTGRES_DB }}
+          PROXY_SERVER: ${{ secrets.PROXY_SERVER }}
+          PROXY_USERNAME: ${{ secrets.PROXY_USERNAME }}
+          PROXY_PASSWORD: ${{ secrets.PROXY_PASSWORD }}
+
+      - name: Copy env file to VM
+        uses: appleboy/scp-action@master
+        with:
+          host: ${{ secrets.SSH_HOSTNAME }}
+          username: ${{ secrets.SSH_USERNAME }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          source: firestorm.env
+          target: /tmp/
+
+      - name: Deploy Firecrawl + configure Caddy (remote)
+        uses: appleboy/ssh-action@master
+        with:
+          host: ${{ secrets.SSH_HOSTNAME }}
+          username: ${{ secrets.SSH_USERNAME }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            set -e
+
+            if ! sudo -n true; then
+              echo "sudo requires a password. Fix sudo on the VM, then re-run."
+              exit 1
+            fi
+
+            if ! command -v docker >/dev/null 2>&1; then
+              echo "Docker not installed on VM. Run workflow: Firestorm - Init VM"
+              exit 1
+            fi
+            if ! command -v git >/dev/null 2>&1; then
+              echo "git not installed on VM. Run workflow: Firestorm - Init VM"
+              exit 1
+            fi
+            if ! command -v caddy >/dev/null 2>&1; then
+              echo "Caddy not installed on VM. Run workflow: Firestorm - Init VM"
+              exit 1
+            fi
+
+            DEPLOY_DIR=/opt/firecrawl
+            REPO_URL=https://github.com/Ajanth/firecrawl.git
+            BRANCH='${{ vars.FIRECRAWL_BRANCH }}'
+            DOMAIN='${{ vars.FIRECRAWL_DOMAIN }}'
+            HOST_PORT='${{ vars.FIRECRAWL_PORT }}'
+
+            sudo mkdir -p "$DEPLOY_DIR"
+            sudo chown "$USER:$USER" "$DEPLOY_DIR"
+
+            if [ ! -d "$DEPLOY_DIR/.git" ]; then
+              rm -rf "$DEPLOY_DIR"/*
+              git clone --branch "$BRANCH" --recursive "$REPO_URL" "$DEPLOY_DIR"
+            fi
+
+            cd "$DEPLOY_DIR"
+            git fetch origin
+            git checkout "$BRANCH"
+            git pull --ff-only origin "$BRANCH"
+            git submodule update --init --recursive
+
+            mv /tmp/firestorm.env "$DEPLOY_DIR/.env"
+
+            cat > "$DEPLOY_DIR/docker-compose.firestorm.override.yaml" <<EOF
+            services:
+              api:
+                ports:
+                  - "127.0.0.1:${HOST_PORT}:3002"
+            EOF
+
+            sudo docker compose --project-name firestorm \
+              -f docker-compose.yaml \
+              -f docker-compose.override.yaml \
+              -f docker-compose.firestorm.override.yaml \
+              --env-file .env \
+              up -d --build --remove-orphans
+
+            echo "Local health check (http://127.0.0.1:${HOST_PORT}/v0/health/readiness)..."
+            i=0
+            while [ "$i" -lt 30 ]; do
+              if curl -fsS "http://127.0.0.1:${HOST_PORT}/v0/health/readiness" >/dev/null 2>&1; then
+                break
+              fi
+              i=$((i+1))
+              sleep 3
+            done
+            if [ "$i" -ge 30 ]; then
+              echo "Local API health check failed"
+              sudo docker compose --project-name firestorm \
+                -f docker-compose.yaml -f docker-compose.override.yaml -f docker-compose.firestorm.override.yaml \
+                --env-file .env ps || true
+              sudo docker compose --project-name firestorm \
+                -f docker-compose.yaml -f docker-compose.override.yaml -f docker-compose.firestorm.override.yaml \
+                --env-file .env logs --no-color --tail=250 api || true
+              exit 1
+            fi
+
+            echo "Writing Caddy config..."
+            HASH="$(caddy hash-password --plaintext '${{ secrets.BASIC_AUTH_PASSWORD }}')"
+            sudo tee /etc/caddy/Caddyfile >/dev/null <<EOF
+            ${DOMAIN} {
+              encode zstd gzip
+              basicauth {
+                ${{ secrets.BASIC_AUTH_USER }} ${HASH}
+              }
+              reverse_proxy 127.0.0.1:${HOST_PORT}
+            }
+            EOF
+
+            sudo caddy validate --config /etc/caddy/Caddyfile
+            sudo systemctl reload caddy
+
+      - name: External health checks (HTTPS + Basic Auth)
+        shell: bash
+        env:
+          FIRECRAWL_DOMAIN: ${{ vars.FIRECRAWL_DOMAIN }}
+          BASIC_AUTH_USER: ${{ secrets.BASIC_AUTH_USER }}
+          BASIC_AUTH_PASSWORD: ${{ secrets.BASIC_AUTH_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          url="https://${FIRECRAWL_DOMAIN}/v0/health/readiness"
+
+          echo "Unauthenticated should be 401..."
+          code="$(curl -sS -o /dev/null -w '%{http_code}' "$url" || true)"
+          if [ "$code" != "401" ]; then
+            echo "Expected 401, got $code"
+            exit 1
+          fi
+
+          echo "Authenticated should be 200 (retrying for cert issuance + warmup)..."
+          for i in {1..20}; do
+            if curl -u "${BASIC_AUTH_USER}:${BASIC_AUTH_PASSWORD}" -fsS "$url" >/dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 3
+          done
+
+          echo "Authenticated check failed"
+          curl -u "${BASIC_AUTH_USER}:${BASIC_AUTH_PASSWORD}" -v "$url" || true
+          exit 1
+
