@@ -126,6 +126,16 @@ jobs:
               down --remove-orphans || true
 
             echo "Ensuring 127.0.0.1:${HOST_PORT} is free..."
+            if ! command -v ss >/dev/null 2>&1; then
+              echo "Missing ss(8); install iproute2 and re-run init."
+              exit 1
+            fi
+            if ! command -v fuser >/dev/null 2>&1; then
+              export DEBIAN_FRONTEND=noninteractive
+              sudo apt-get update -y
+              sudo apt-get install -y psmisc
+            fi
+
             # Stop any other container holding the port (from any other project).
             mapfile -t port_containers < <(sudo docker ps --format '{{.ID}} {{.Names}} {{.Ports}}' | grep -E "(:|0\\.0\\.0\\.0:|127\\.0\\.0\\.1:)${HOST_PORT}->" | awk '{print $1}' || true)
             for cid in "${port_containers[@]:-}"; do
@@ -133,6 +143,13 @@ jobs:
               sudo docker stop "$cid" || true
               sudo docker rm "$cid" || true
             done
+
+            if sudo ss -ltnp "sport = :${HOST_PORT}" 2>/dev/null | grep -q .; then
+              echo "Port ${HOST_PORT} still in use after container cleanup; attempting to kill listener..."
+              sudo ss -ltnp "sport = :${HOST_PORT}" || true
+              sudo fuser -k "${HOST_PORT}/tcp" || true
+              sleep 2
+            fi
 
             if sudo ss -ltnp "sport = :${HOST_PORT}" 2>/dev/null | grep -q .; then
               echo "Port ${HOST_PORT} still in use; details:"
