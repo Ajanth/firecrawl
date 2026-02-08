@@ -8,11 +8,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Bootstrap VM (Docker + Compose + Caddy)
-        uses: appleboy/ssh-action@master
+        uses: appleboy/ssh-action@v1.2.5
         with:
           host: ${{ secrets.SSH_HOSTNAME }}
           username: ${{ secrets.SSH_USERNAME }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script_stop: true
           script: |
             set -e
             export DEBIAN_FRONTEND=noninteractive
@@ -61,4 +62,3 @@ jobs:
             echo "Services:"
             sudo systemctl is-active --quiet docker
             sudo systemctl is-active --quiet caddy
-

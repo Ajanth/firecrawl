@@ -15,21 +15,26 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cat > firestorm.env <<'EOF'
-          # Required
-          HOST=0.0.0.0
-          INTERNAL_PORT=3002
+          escape_dotenv() {
+            # Quote values so spaces/# don't break parsing. Newlines aren't supported by dotenv anyway.
+            printf '%s' "${1:-}" | sed -e 's|\\|\\\\|g' -e 's|"|\\"|g'
+          }
 
-          # Optional (blank is OK)
-          OPENAI_API_KEY=${OPENAI_API_KEY}
-          BULL_AUTH_KEY=${BULL_AUTH_KEY}
-          POSTGRES_USER=${POSTGRES_USER}
-          POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-          POSTGRES_DB=${POSTGRES_DB}
-          PROXY_SERVER=${PROXY_SERVER}
-          PROXY_USERNAME=${PROXY_USERNAME}
-          PROXY_PASSWORD=${PROXY_PASSWORD}
-          EOF
+          {
+            echo "# Required"
+            echo "HOST=0.0.0.0"
+            echo "INTERNAL_PORT=3002"
+            echo
+            echo "# Optional (blank is OK)"
+            printf 'OPENAI_API_KEY="%s"\n' "$(escape_dotenv "${OPENAI_API_KEY:-}")"
+            printf 'BULL_AUTH_KEY="%s"\n' "$(escape_dotenv "${BULL_AUTH_KEY:-}")"
+            printf 'POSTGRES_USER="%s"\n' "$(escape_dotenv "${POSTGRES_USER:-}")"
+            printf 'POSTGRES_PASSWORD="%s"\n' "$(escape_dotenv "${POSTGRES_PASSWORD:-}")"
+            printf 'POSTGRES_DB="%s"\n' "$(escape_dotenv "${POSTGRES_DB:-}")"
+            printf 'PROXY_SERVER="%s"\n' "$(escape_dotenv "${PROXY_SERVER:-}")"
+            printf 'PROXY_USERNAME="%s"\n' "$(escape_dotenv "${PROXY_USERNAME:-}")"
+            printf 'PROXY_PASSWORD="%s"\n' "$(escape_dotenv "${PROXY_PASSWORD:-}")"
+          } > firestorm.env
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           BULL_AUTH_KEY: ${{ secrets.BULL_AUTH_KEY }}
@@ -41,7 +46,7 @@ jobs:
           PROXY_PASSWORD: ${{ secrets.PROXY_PASSWORD }}
 
       - name: Copy env file to VM
-        uses: appleboy/scp-action@master
+        uses: appleboy/scp-action@v1.0.0
         with:
           host: ${{ secrets.SSH_HOSTNAME }}
           username: ${{ secrets.SSH_USERNAME }}
@@ -50,13 +55,14 @@ jobs:
           target: /tmp/
 
       - name: Deploy Firecrawl + configure Caddy (remote)
-        uses: appleboy/ssh-action@master
+        uses: appleboy/ssh-action@v1.2.5
         with:
           host: ${{ secrets.SSH_HOSTNAME }}
           username: ${{ secrets.SSH_USERNAME }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script_stop: true
           script: |
-            set -e
+            set -euo pipefail
 
             if ! sudo -n true; then
               echo "sudo requires a password. Fix sudo on the VM, then re-run."
@@ -133,12 +139,14 @@ jobs:
             fi
 
             echo "Writing Caddy config..."
-            HASH="$(caddy hash-password --plaintext '${{ secrets.BASIC_AUTH_PASSWORD }}')"
+            BASIC_USER='${{ secrets.BASIC_AUTH_USER }}'
+            BASIC_PASS='${{ secrets.BASIC_AUTH_PASSWORD }}'
+            HASH="$(caddy hash-password --plaintext "$BASIC_PASS")"
             sudo tee /etc/caddy/Caddyfile >/dev/null <<EOF
             ${DOMAIN} {
               encode zstd gzip
               basicauth {
-                ${{ secrets.BASIC_AUTH_USER }} ${HASH}
+                ${BASIC_USER} ${HASH}
               }
               reverse_proxy 127.0.0.1:${HOST_PORT}
             }
@@ -174,6 +182,5 @@ jobs:
           done
 
           echo "Authenticated check failed"
-          curl -u "${BASIC_AUTH_USER}:${BASIC_AUTH_PASSWORD}" -v "$url" || true
+          curl -u "${BASIC_AUTH_USER}:${BASIC_AUTH_PASSWORD}" -sS -o /dev/null -w 'http_code=%{http_code}\n' "$url" || true
           exit 1
-
