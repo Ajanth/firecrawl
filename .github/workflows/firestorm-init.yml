@@ -13,9 +13,8 @@ jobs:
           host: ${{ secrets.SSH_HOSTNAME }}
           username: ${{ secrets.SSH_USERNAME }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          script_stop: true
           script: |
-            set -e
+            set -euo pipefail
             export DEBIAN_FRONTEND=noninteractive
 
             echo "Checking sudo (non-interactive)..."
@@ -29,17 +28,43 @@ jobs:
 
             echo "Installing Docker + Compose plugin (if missing)..."
             if ! command -v docker >/dev/null 2>&1; then
-              sudo apt-get install -y docker.io docker-compose-plugin
+              sudo apt-get install -y docker.io
               sudo systemctl enable docker
               sudo systemctl start docker
-            else
-              sudo apt-get install -y docker-compose-plugin || true
-              sudo systemctl enable docker || true
-              sudo systemctl start docker || true
+            fi
+
+            # Ensure Compose v2 is available as `docker compose`. Ubuntu's repo doesn't always ship
+            # `docker-compose-plugin`, so fall back to installing the official plugin binary.
+            if ! sudo docker compose version >/dev/null 2>&1; then
+              echo "Installing docker compose plugin..."
+              if sudo apt-get install -y docker-compose-plugin; then
+                true
+              else
+                echo "Apt package docker-compose-plugin not available; installing plugin binary..."
+                arch="$(uname -m)"
+                case "$arch" in
+                  x86_64|amd64) bin="docker-compose-linux-x86_64" ;;
+                  aarch64|arm64) bin="docker-compose-linux-aarch64" ;;
+                  *)
+                    echo "Unsupported architecture for docker compose plugin: $arch"
+                    exit 1
+                    ;;
+                esac
+                ver="$(curl -fsSL https://api.github.com/repos/docker/compose/releases/latest | sed -n 's/.*\"tag_name\": \"\\(v[^\"]*\\)\".*/\\1/p' | head -n 1)"
+                if [ -z "$ver" ]; then
+                  echo "Failed to resolve latest docker/compose version"
+                  exit 1
+                fi
+                url="https://github.com/docker/compose/releases/download/${ver}/${bin}"
+                sudo mkdir -p /usr/local/lib/docker/cli-plugins
+                sudo curl -fsSL "$url" -o /usr/local/lib/docker/cli-plugins/docker-compose
+                sudo chmod +x /usr/local/lib/docker/cli-plugins/docker-compose
+              fi
             fi
 
             echo "Verifying Docker..."
             sudo docker info >/dev/null
+            sudo docker compose version >/dev/null
 
             echo "Installing Caddy (if missing)..."
             if ! command -v caddy >/dev/null 2>&1; then

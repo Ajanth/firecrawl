@@ -60,7 +60,6 @@ jobs:
           host: ${{ secrets.SSH_HOSTNAME }}
           username: ${{ secrets.SSH_USERNAME }}
           key: ${{ secrets.SSH_PRIVATE_KEY }}
-          script_stop: true
           script: |
             set -euo pipefail
 
@@ -71,6 +70,10 @@ jobs:
 
             if ! command -v docker >/dev/null 2>&1; then
               echo "Docker not installed on VM. Run workflow: Firestorm - Init VM"
+              exit 1
+            fi
+            if ! sudo docker compose version >/dev/null 2>&1; then
+              echo "Docker Compose plugin not installed on VM. Run workflow: Firestorm - Init VM"
               exit 1
             fi
             if ! command -v git >/dev/null 2>&1; then
