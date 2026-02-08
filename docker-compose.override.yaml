@@ -1,0 +1,13 @@
+services:
+  redis:
+    volumes:
+      - redis-data:/data
+
+  nuq-postgres:
+    volumes:
+      - nuq-postgres-data:/var/lib/postgresql/data
+
+volumes:
+  redis-data:
+  nuq-postgres-data:
+

@@ -109,10 +109,24 @@ jobs:
 
             cat > "$DEPLOY_DIR/docker-compose.firestorm.override.yaml" <<EOF
             services:
-              api:
-                ports:
-                  - "127.0.0.1:${HOST_PORT}:3002"
+              redis:
+                volumes:
+                  - redis-data:/data
+              nuq-postgres:
+                volumes:
+                  - nuq-postgres-data:/var/lib/postgresql/data
+            volumes:
+              redis-data:
+              nuq-postgres-data:
             EOF
+
+            # Bind the API to localhost only. The base compose uses ${PORT}:${INTERNAL_PORT}.
+            # Setting PORT to "127.0.0.1:<hostport>" yields "127.0.0.1:<hostport>:3002".
+            if grep -q '^PORT=' "$DEPLOY_DIR/.env"; then
+              sed -i "s|^PORT=.*|PORT=127.0.0.1:${HOST_PORT}|" "$DEPLOY_DIR/.env"
+            else
+              printf '\nPORT=127.0.0.1:%s\n' "$HOST_PORT" >> "$DEPLOY_DIR/.env"
+            fi
 
             # Idempotency + port safety:
             # - Bring the previous stack down (keeps named volumes unless -v is used).
@@ -120,7 +134,6 @@ jobs:
             echo "Stopping previous firestorm stack (keeps volumes)..."
             sudo docker compose --project-name firestorm \
               -f docker-compose.yaml \
-              -f docker-compose.override.yaml \
               -f docker-compose.firestorm.override.yaml \
               --env-file .env \
               down --remove-orphans || true
@@ -174,7 +187,6 @@ jobs:
 
             sudo docker compose --project-name firestorm \
               -f docker-compose.yaml \
-              -f docker-compose.override.yaml \
               -f docker-compose.firestorm.override.yaml \
               --env-file .env \
               up -d --build --remove-orphans
@@ -191,10 +203,10 @@ jobs:
             if [ "$i" -ge 30 ]; then
               echo "Local API health check failed"
               sudo docker compose --project-name firestorm \
-                -f docker-compose.yaml -f docker-compose.override.yaml -f docker-compose.firestorm.override.yaml \
+                -f docker-compose.yaml -f docker-compose.firestorm.override.yaml \
                 --env-file .env ps || true
               sudo docker compose --project-name firestorm \
-                -f docker-compose.yaml -f docker-compose.override.yaml -f docker-compose.firestorm.override.yaml \
+                -f docker-compose.yaml -f docker-compose.firestorm.override.yaml \
                 --env-file .env logs --no-color --tail=250 api || true
               exit 1
             fi
