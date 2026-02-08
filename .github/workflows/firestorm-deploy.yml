@@ -218,15 +218,34 @@ jobs:
             sudo tee /etc/caddy/Caddyfile >/dev/null <<EOF
             ${DOMAIN} {
               encode zstd gzip
-              basicauth {
+              basic_auth {
                 ${BASIC_USER} ${HASH}
               }
               reverse_proxy 127.0.0.1:${HOST_PORT}
             }
             EOF
 
+            sudo caddy fmt --overwrite /etc/caddy/Caddyfile >/dev/null
             sudo caddy validate --config /etc/caddy/Caddyfile
             sudo systemctl reload caddy
+
+            echo "Verifying Caddy locally (SNI + auth)..."
+            # Unauth should be 401
+            code="$(curl -sS -o /dev/null -w '%{http_code}' --resolve "${DOMAIN}:443:127.0.0.1" "https://${DOMAIN}/v0/health/readiness" || true)"
+            if [ "$code" != "401" ]; then
+              echo "Expected 401 from local Caddy without auth, got $code"
+              sudo systemctl status caddy --no-pager || true
+              sudo journalctl -u caddy --no-pager -n 200 || true
+              exit 1
+            fi
+            # Auth should be 200 (allow self-signed during initial issuance via --insecure not needed if cert is valid,
+            # but local resolve can race cert provisioning; keep connect timeouts tight).
+            if ! curl -u "${BASIC_USER}:${BASIC_PASS}" -fsS --connect-timeout 5 --max-time 15 \
+              --resolve "${DOMAIN}:443:127.0.0.1" "https://${DOMAIN}/v0/health/readiness" >/dev/null 2>&1; then
+              echo "Authenticated local Caddy check failed"
+              sudo journalctl -u caddy --no-pager -n 200 || true
+              exit 1
+            fi
 
       - name: External health checks (HTTPS + Basic Auth)
         shell: bash
@@ -239,8 +258,11 @@ jobs:
 
           url="https://${FIRECRAWL_DOMAIN}/v0/health/readiness"
 
+          echo "DNS resolution:"
+          getent ahosts "${FIRECRAWL_DOMAIN}" | awk '{print $1}' | sort -u | sed 's/^/ - /' || true
+
           echo "Unauthenticated should be 401..."
-          code="$(curl -sS -o /dev/null -w '%{http_code}' "$url" || true)"
+          code="$(curl -4 -sS --connect-timeout 5 --max-time 15 -o /dev/null -w '%{http_code}' "$url" || true)"
           if [ "$code" != "401" ]; then
             echo "Expected 401, got $code"
             exit 1
@@ -248,12 +270,12 @@ jobs:
 
           echo "Authenticated should be 200 (retrying for cert issuance + warmup)..."
           for i in {1..20}; do
-            if curl -u "${BASIC_AUTH_USER}:${BASIC_AUTH_PASSWORD}" -fsS "$url" >/dev/null 2>&1; then
+            if curl -4 -u "${BASIC_AUTH_USER}:${BASIC_AUTH_PASSWORD}" -fsS --connect-timeout 5 --max-time 15 "$url" >/dev/null 2>&1; then
               exit 0
             fi
             sleep 3
           done
 
           echo "Authenticated check failed"
-          curl -u "${BASIC_AUTH_USER}:${BASIC_AUTH_PASSWORD}" -sS -o /dev/null -w 'http_code=%{http_code}\n' "$url" || true
+          curl -4 -u "${BASIC_AUTH_USER}:${BASIC_AUTH_PASSWORD}" -sS --connect-timeout 5 --max-time 15 -o /dev/null -w 'http_code=%{http_code}\n' "$url" || true
           exit 1
